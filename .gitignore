@@ -1,0 +1,10 @@
+**/bin
+**/obj
+**/.vscode
+
+.git
+
+**/.vs/
+.secrects
+**/.idea
+**/.cache
