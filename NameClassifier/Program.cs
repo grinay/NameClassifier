@@ -1,7 +1,15 @@
 ﻿// See https://aka.ms/new-console-template for more information
 
+using Common;
+using Microsoft.Extensions.Logging;
 using Microsoft.ML;
+using Microsoft.ML.AutoML;
+using Microsoft.ML.Data;
 using Microsoft.ML.TorchSharp;
+using Microsoft.ML.TorchSharp.NasBert;
+using Microsoft.ML.Trainers;
+using Microsoft.ML.Trainers.FastTree;
+using NameClassifier;
 using NameClassifier.dataset;
 
 var cleanedFirstNameFile = "dataset/cleaned-first-names.json";
@@ -16,45 +24,122 @@ DatasetParser.CleanNames(lastNamesFile, cleanedLastNameFile);
 var firstNames = File.ReadAllLines(cleanedFirstNameFile);
 var lastNames = File.ReadAllLines(cleanedLastNameFile);
 
+using var loggerFactory = LoggerFactory.Create(builder =>
+{
+    builder
+        .AddFilter("Microsoft", LogLevel.Debug)
+        .AddFilter("System", LogLevel.Debug)
+        .AddConsole();
+});
+ILogger logger = loggerFactory.CreateLogger<Program>();
 // Initialize MLContext
-var mlContext = new MLContext();
+var mlContext = new MLContext()
+{
+    GpuDeviceId = 0,
+};
 
 // Load your data
 var names = firstNames
-    .Select(x => new { Sentence = x, Label = "firstname" })
-    .Concat(lastNames.Select(x => new { Sentence = x, Label = "lastname" })).ToArray();
+    .Select(x => new NameInput(x))
+    .Concat(lastNames.Select(x => new NameInput(x, true)))
+    .ToArray();
 
 
 var namesDataView = mlContext.Data.LoadFromEnumerable(names);
 
-var dataSplit = mlContext.Data.TrainTestSplit(namesDataView, testFraction: 0.2);
+var dataSplit = mlContext.Data.TrainTestSplit(namesDataView, testFraction: 0.2, seed: Random.Shared.Next());
 var trainData = dataSplit.TrainSet;
 var testData = dataSplit.TestSet;
 
+if (!File.Exists("model.zip"))
+{
+// var pipeline =
+//     mlContext.Transforms.Conversion.MapValueToKey("Label", "Label")
+//         // .Append(
+//         // mlContext.Transforms.Text.FeaturizeText(inputColumnName: "Name", outputColumnName: "NameFeaturized"))
+//         .Append(mlContext.MulticlassClassification.Trainers.TextClassification(
+//             labelColumnName: "Label",
+//             sentence1ColumnName: "Name",
+//             architecture: BertArchitecture.Roberta,
+//             maxEpochs: 3,
+//             batchSize: 1500))
+//         .Append(mlContext.Transforms.Conversion.MapKeyToValue("PredictedLabel", "PredictedLabel"))
+//         .AppendCacheCheckpoint(mlContext);
 
-//Define your training pipeline
-var pipeline =
-    mlContext.Transforms.Conversion.MapValueToKey("Label", "Label")
-        .Append(mlContext.MulticlassClassification.Trainers.TextClassification(sentence1ColumnName: "Sentence"))
-        .Append(mlContext.Transforms.Conversion.MapKeyToValue("PredictedLabel"));
 
-Console.WriteLine("Start training");
+// var pipeline =
+//     mlContext.Transforms.Text.FeaturizeText(inputColumnName: "Name", outputColumnName: "NameFeaturized")
+//         .Append(mlContext.BinaryClassification.Trainers.FastForest(featureColumnName: "NameFeaturized",
+//             labelColumnName: "Label", numberOfLeaves: 50, numberOfTrees: 50, minimumExampleCountPerLeaf: 20))
+//         .Append(mlContext.Transforms.Conversion.MapKeyToValue("PredictedLabel"))
+//         .AppendCacheCheckpoint(mlContext);
 
-// Train the model
-var model = pipeline.Fit(trainData);
+//THE BEST SO FAR  
+//Accuracy: 0.7149557927407334
+// F1 Score : 0.7638783508841452
+//ALL Manual tests correct
+    var pipeline =
+        mlContext.Transforms.Text.FeaturizeText(inputColumnName: "Name", outputColumnName: "NameFeaturized")
+            .Append(mlContext.BinaryClassification.Trainers.LbfgsLogisticRegression(
+                new LbfgsLogisticRegressionBinaryTrainer.Options()
+                {
+                    FeatureColumnName = "NameFeaturized",
+                    LabelColumnName = "Label",
+                    HistorySize = 50,
+                    OptimizationTolerance = 1E-09f,
+                    DenseOptimizer = true,
+                }))
+            .AppendCacheCheckpoint(mlContext);
+//SdcaLogisticRegression - bad results
+//AveragedPerceptron - bad results
+// var pipeline =
+//     mlContext.Transforms.Text.FeaturizeText(inputColumnName: "Name", outputColumnName: "NameFeaturized")
+//         .Append(mlContext.BinaryClassification.Trainers.Gam(featureColumnName: "NameFeaturized",
+//             labelColumnName: "Label",
+//             numberOfIterations: 20))
+//         .AppendCacheCheckpoint(mlContext);
 
-// Evaluate the model's performance against the TEST data set
+
+// var model = pipeline.Fit(trainData);
+    var model = pipeline.Fit(namesDataView);
+    mlContext.Model.Save(model, trainData.Schema, "model.zip");
+}
+
+var trainedModel = mlContext.Model.Load("model.zip", out var schema);
+
+// // Evaluate the model's performance against the TEST data set
 Console.WriteLine("Evaluating model performance...");
 
 // We need to apply the same transformations to our test set so it can be evaluated via the resulting model
-var transformedTest = model.Transform(testData);
-var metrics = mlContext.MulticlassClassification.Evaluate(transformedTest);
+var transformedTest = trainedModel.Transform(testData);
+
+var metrics =
+    mlContext.BinaryClassification.EvaluateNonCalibrated(transformedTest);
 
 // Display Metrics
-Console.WriteLine($"Macro Accuracy: {metrics.MacroAccuracy}");
-Console.WriteLine($"Micro Accuracy: {metrics.MicroAccuracy}");
-Console.WriteLine($"Log Loss: {metrics.LogLoss}");
+Console.WriteLine($"Accuracy: {metrics.Accuracy}");
+Console.WriteLine($"F1 Score : {metrics.F1Score}");
+
+// Console.WriteLine($"Log Loss: {metrics.}");
 Console.WriteLine();
 
 // Generate the table for diagnostics
 Console.WriteLine(metrics.ConfusionMatrix.GetFormattedConfusionTable());
+
+
+// Create PredictionEngines
+var predictionEngine = mlContext.Model.CreatePredictionEngine<NameInput, NamePredictor>(trainedModel);
+
+Console.WriteLine(predictionEngine.Predict(new NameInput("grinevskiy")).PredictedLabel); //true
+Console.WriteLine(predictionEngine.Predict(new NameInput("bechmann")).PredictedLabel); //true
+Console.WriteLine(predictionEngine.Predict(new NameInput("snow")).PredictedLabel); //true
+Console.WriteLine(predictionEngine.Predict(new NameInput("alshkili")).PredictedLabel); //true
+Console.WriteLine(predictionEngine.Predict(new NameInput("raikhanova")).PredictedLabel); //true
+Console.WriteLine(predictionEngine.Predict(new NameInput("mask")).PredictedLabel); //true
+Console.WriteLine(predictionEngine.Predict(new NameInput("levay")).PredictedLabel); //true
+Console.WriteLine(predictionEngine.Predict(new NameInput("aleksander")).PredictedLabel); //false
+Console.WriteLine(predictionEngine.Predict(new NameInput("elena")).PredictedLabel); //false
+Console.WriteLine(predictionEngine.Predict(new NameInput("john")).PredictedLabel); //false
+Console.WriteLine(predictionEngine.Predict(new NameInput("amanda")).PredictedLabel); //false
+
+// PredictiIsFirstNameonEngine<>
