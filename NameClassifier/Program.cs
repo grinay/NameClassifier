@@ -9,6 +9,7 @@ using Microsoft.ML.TorchSharp;
 using Microsoft.ML.TorchSharp.NasBert;
 using Microsoft.ML.Trainers;
 using Microsoft.ML.Trainers.FastTree;
+using Microsoft.ML.Transforms.Text;
 using NameClassifier;
 using NameClassifier.dataset;
 
@@ -51,8 +52,8 @@ var dataSplit = mlContext.Data.TrainTestSplit(namesDataView, testFraction: 0.2, 
 var trainData = dataSplit.TrainSet;
 var testData = dataSplit.TestSet;
 
-if (!File.Exists("model.zip"))
-{
+// if (!File.Exists("model.zip"))
+// {
 // var pipeline =
 //     mlContext.Transforms.Conversion.MapValueToKey("Label", "Label")
 //         // .Append(
@@ -78,18 +79,34 @@ if (!File.Exists("model.zip"))
 //Accuracy: 0.7149557927407334
 // F1 Score : 0.7638783508841452
 //ALL Manual tests correct
-    var pipeline =
-        mlContext.Transforms.Text.FeaturizeText(inputColumnName: "Name", outputColumnName: "NameFeaturized")
-            .Append(mlContext.BinaryClassification.Trainers.LbfgsLogisticRegression(
-                new LbfgsLogisticRegressionBinaryTrainer.Options()
-                {
-                    FeatureColumnName = "NameFeaturized",
-                    LabelColumnName = "Label",
-                    HistorySize = 50,
-                    OptimizationTolerance = 1E-09f,
-                    DenseOptimizer = true,
-                }))
-            .AppendCacheCheckpoint(mlContext);
+var pipeline =
+    // mlContext.Transforms.Text.FeaturizeText(inputColumnName: "Name", outputColumnName: "NameFeaturized")
+    mlContext.Transforms.Text.NormalizeText(inputColumnName: "Name", outputColumnName: "NameFeaturized",
+            keepDiacritics: false, keepNumbers: false, keepPunctuations: false)
+        .Append(mlContext.Transforms.Text.ProduceWordBags(inputColumnName: "NameFeaturized",
+            outputColumnName: "NameFeaturized", weighting: NgramExtractingEstimator.WeightingCriteria.TfIdf))
+        // .Append(mlContext.Transforms.Conversion.ConvertType("NameFeaturized", "NameFeaturized",DataKind.String))
+        // .Append(mlContext.Transforms.Text.TokenizeIntoWords("NameFeaturized", "NameFeaturized"))
+        // .Append(mlContext.Transforms.Text. (inputColumnName: "NameFeaturized", outputColumnName: "NameFeaturized"))
+        // .Append(mlContext.Transforms.Text.ApplyWordEmbedding(inputColumnName: "NameFeaturized",
+        //     outputColumnName: "NameFeaturized",
+        //     modelKind: WordEmbeddingEstimator.PretrainedModelKind.FastTextWikipedia300D))
+        // .Append(mlContext.Transforms.Text.FeaturizeText(inputColumnName: "NameFeaturized", outputColumnName: "NameFeaturized"))
+        // .Append(mlContext.Transforms.Text.ApplyWordEmbedding(inputColumnName: "NameFeaturized",
+        //     outputColumnName: "NameFeaturized",
+        //     modelKind: WordEmbeddingEstimator.PretrainedModelKind.FastTextWikipedia300D))
+        // .Append(mlContext.Transforms.Text.TokenizeIntoCharactersAsKeys(inputColumnName:"NameFeaturized",outputColumnName:"NameFeaturized"))
+        // .Append(mlContext.BinaryClassification.Trainers.LinearSvm())
+        .Append(mlContext.BinaryClassification.Trainers.LbfgsLogisticRegression(
+            new LbfgsLogisticRegressionBinaryTrainer.Options()
+            {
+                FeatureColumnName = "NameFeaturized",
+                LabelColumnName = "Label",
+                HistorySize = 50,
+                OptimizationTolerance = 1E-09f,
+                DenseOptimizer = true,
+            }))
+        .AppendCacheCheckpoint(mlContext);
 //SdcaLogisticRegression - bad results
 //AveragedPerceptron - bad results
 // var pipeline =
@@ -101,9 +118,9 @@ if (!File.Exists("model.zip"))
 
 
 // var model = pipeline.Fit(trainData);
-    var model = pipeline.Fit(namesDataView);
-    mlContext.Model.Save(model, trainData.Schema, "model.zip");
-}
+var model = pipeline.Fit(namesDataView);
+mlContext.Model.Save(model, trainData.Schema, "model.zip");
+// }
 
 var trainedModel = mlContext.Model.Load("model.zip", out var schema);
 
